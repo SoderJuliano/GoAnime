@@ -280,14 +280,21 @@ func playVideo(
 	// Set up mpv arguments for optimal playback
 	mpvArgs := []string{
 		"--hwdec=auto-safe",
-		"--vo=gpu",
-		"--profile=fast",
+		"--vo=gpu,xv,x11,wayland", // More compatible VO list
 		"--cache=yes",
 		"--demuxer-max-bytes=300M",
 		"--demuxer-readahead-secs=20",
 		"--no-config",
 		"--video-latency-hacks=yes",
 		"--audio-display=no",
+		fmt.Sprintf("--user-agent=%s", scraper.UserAgent),
+	}
+
+	// Add referrer if it's from a known source
+	if strings.Contains(videoURL, "lightspeedst.net") || strings.Contains(videoURL, "animefire.io") {
+		mpvArgs = append(mpvArgs, "--referrer=https://animefire.io/")
+	} else if strings.Contains(videoURL, "allanime") {
+		mpvArgs = append(mpvArgs, fmt.Sprintf("--referrer=%s", scraper.AllAnimeReferer))
 	}
 
 	// Only apply audio/subtitle language preferences for movies/TV (FlixHQ)

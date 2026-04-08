@@ -83,7 +83,6 @@ func StartVideo(link string, args []string) (string, error) {
 
 	mpvArgs := []string{
 		"--no-terminal",
-		"--quiet",
 		fmt.Sprintf("--input-ipc-server=%s", socketPath),
 	}
 	// Validate and filter any additional args before passing to mpv
@@ -104,13 +103,18 @@ func StartVideo(link string, args []string) (string, error) {
 	cmd := exec.Command(mpvPath, mpvArgs...)
 	setProcessGroup(cmd) // Handle OS-specific process groups
 
-	// Capture stderr for better error reporting
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
+	// Capture stdout and stderr for better error reporting
+	var output bytes.Buffer
+	cmd.Stdout = &output
+	cmd.Stderr = &output
+
+	// Log URL for debugging (always log this if it fails to start)
+	fullCmd := append([]string{mpvPath}, mpvArgs...)
+	util.Debugf("Attempting to play URL: %s", link)
 
 	startTime := time.Now()
 	if err := cmd.Start(); err != nil {
-		return "", fmt.Errorf("failed to start mpv: %w (stderr: %s)", err, stderr.String())
+		return "", fmt.Errorf("failed to start mpv: %w (output: %s)\nCommand: %v", err, output.String(), fullCmd)
 	}
 
 	if util.IsDebug {
@@ -120,48 +124,42 @@ func StartVideo(link string, args []string) (string, error) {
 	// Wait for socket creation with adaptive timeout and exponential backoff
 	// Total max wait time: ~10 seconds (accommodates slow network streams)
 	// Initial intervals are short for fast local files, then back off for streams
-	maxWaitTime := 10 * time.Second
+	maxWaitTime := 60 * time.Second
 	initialInterval := 50 * time.Millisecond
 	maxInterval := 500 * time.Millisecond
 	currentInterval := initialInterval
 
+	// Create a channel to notify when the process exits
+	processExited := make(chan error, 1)
+	go func() {
+		processExited <- cmd.Wait()
+	}()
+
 	for time.Since(startTime) < maxWaitTime {
-		if util.IsDebug {
-			elapsed := time.Since(startTime)
-			fmt.Printf("[DEBUG] Attempt at %.2fs: checking socket connection...\n", elapsed.Seconds())
-		}
-
-		// Try to connect to the socket instead of checking file existence
-		// This works for both Unix sockets and Windows named pipes
-		conn, err := dialMPVSocket(socketPath)
-		if err == nil {
-			_ = conn.Close() // Close immediately, we just wanted to verify connectivity
-			if util.IsDebug {
-				fmt.Printf("[DEBUG] Socket connected successfully after %.2fs\n", time.Since(startTime).Seconds())
-			}
-			return socketPath, nil
-		}
-
-		if util.IsDebug {
-			fmt.Printf("[DEBUG] Connection attempt failed: %v\n", err)
-		}
-
-		// Check if MPV process is still running
-		if cmd.Process == nil {
-			return "", fmt.Errorf("mpv process not started properly: %s", stderr.String())
-		}
-
-		// Check if process exited prematurely
-		// Note: ProcessState is nil until the process exits, so we need a different check
 		select {
-		case <-time.After(currentInterval):
-			// Apply exponential backoff
-			currentInterval = time.Duration(float64(currentInterval) * 1.5)
-			if currentInterval > maxInterval {
-				currentInterval = maxInterval
+		case err := <-processExited:
+			// Process died, return error immediately
+			errMsg := output.String()
+			if errMsg == "" {
+				errMsg = "mpv exited without any output"
 			}
-		default:
-			time.Sleep(currentInterval)
+			if err != nil {
+				return "", fmt.Errorf("mpv process exited with error: %w (output: %s)\nURL: %s\nCommand: %v", err, errMsg, link, fullCmd)
+			}
+			return "", fmt.Errorf("mpv process exited prematurely (output: %s)\nURL: %s\nCommand: %v", errMsg, link, fullCmd)
+
+		case <-time.After(currentInterval):
+			// Try to connect to the socket
+			conn, err := dialMPVSocket(socketPath)
+			if err == nil {
+				_ = conn.Close()
+				if util.IsDebug {
+					fmt.Printf("[DEBUG] Socket connected successfully after %.2fs\n", time.Since(startTime).Seconds())
+				}
+				return socketPath, nil
+			}
+
+			// Apply exponential backoff for next attempt
 			currentInterval = time.Duration(float64(currentInterval) * 1.5)
 			if currentInterval > maxInterval {
 				currentInterval = maxInterval
@@ -208,6 +206,8 @@ func filterMPVArgs(args []string) []string {
 		"--sid=",        // Subtitle track ID
 		"--sub-file=",   // External subtitle file
 		"--audio-file=", // External audio file
+		"--user-agent=", // Allow user-agent
+		"--referrer=",   // Allow referrer
 		// Add more allowed prefixes here if needed in the future
 	}
 
@@ -428,8 +428,16 @@ func HandleDownloadAndPlay(
 			} else if videoURL != "" && (strings.Contains(videoURL, "sharepoint.com") ||
 				strings.Contains(videoURL, "dropbox.com") ||
 				strings.Contains(videoURL, "wixmp.com") ||
-				strings.HasSuffix(videoURL, ".mp4")) {
-				// Use direct stream URL (SharePoint, Dropbox, etc.)
+				strings.Contains(videoURL, "googlevideo.com") ||
+				strings.Contains(videoURL, "blogger.com") ||
+				strings.Contains(videoURL, ".mp4") ||
+				strings.Contains(videoURL, ".mkv") ||
+				strings.Contains(videoURL, ".webm") ||
+				strings.Contains(videoURL, ".mov") ||
+				strings.Contains(videoURL, ".avi") ||
+				strings.Contains(videoURL, ".flv") ||
+				strings.Contains(videoURL, ".m4v")) {
+				// Use direct stream URL (SharePoint, Dropbox, etc. or direct video files)
 				videoURLToPlay = videoURL
 				if util.IsDebug {
 					util.Debugf("🎯 Using direct stream URL: %s", videoURLToPlay)
@@ -460,8 +468,14 @@ func HandleDownloadAndPlay(
 
 			// Final validation
 			if videoURLToPlay == "" {
-				util.Debugf("❌ No valid video URL found")
-				return fmt.Errorf("no valid video URL found")
+				if videoURL != "" && strings.HasPrefix(videoURL, "http") {
+					// Last resort: use the original videoURL as it is
+					videoURLToPlay = videoURL
+					util.Debugf("⚠️ No reliable video indicator found, but using provided URL as last resort: %s", videoURLToPlay)
+				} else {
+					util.Errorf("❌ No valid video URL found for playback")
+					return fmt.Errorf("no valid video URL found")
+				}
 			}
 
 			if util.IsDebug {
