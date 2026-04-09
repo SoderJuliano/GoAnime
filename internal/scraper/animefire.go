@@ -155,6 +155,23 @@ func (c *AnimefireClient) isChallengePage(doc *goquery.Document) bool {
 func (c *AnimefireClient) extractSearchResults(doc *goquery.Document) []*models.Anime {
 	var animes []*models.Anime
 
+	doc.Find("article.card.cardUltimosEps a").Each(func(i int, s *goquery.Selection) {
+		if urlPath, exists := s.Attr("href"); exists {
+			name := strings.TrimSpace(s.Find("h3.animeTitle").Text())
+			if name != "" {
+				animes = append(animes, &models.Anime{
+					Name: name,
+					URL:  c.resolveURL(c.baseURL, urlPath),
+				})
+			}
+		}
+	})
+
+	if len(animes) > 0 {
+		return animes
+	}
+
+	// Fallback to old selectors if new ones don't work
 	doc.Find(".row.ml-1.mr-1 a").Each(func(i int, s *goquery.Selection) {
 		if urlPath, exists := s.Attr("href"); exists {
 			name := strings.TrimSpace(s.Text())

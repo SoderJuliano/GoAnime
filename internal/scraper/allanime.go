@@ -2,6 +2,7 @@
 package scraper
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -80,6 +81,42 @@ type EpisodeResponse struct {
 	} `json:"data"`
 }
 
+func (c *AllAnimeClient) doGraphQLRequest(query string, variables interface{}) ([]byte, error) {
+	requestBody, err := json.Marshal(map[string]interface{}{
+		"query":     query,
+		"variables": variables,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal GraphQL body: %w", err)
+	}
+
+	req, err := http.NewRequest("POST", c.apiBase, bytes.NewReader(requestBody))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("User-Agent", c.userAgent)
+	req.Header.Set("Referer", c.referer)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to make request: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
+	}
+
+	return body, nil
+}
+
 // EpisodesListResponse represents the API response for episodes list
 type EpisodesListResponse struct {
 	Data struct {
@@ -118,32 +155,9 @@ func (c *AllAnimeClient) SearchAnime(query string, options ...interface{}) ([]*m
 		"countryOrigin":   "ALL",
 	}
 
-	// Marshal the variables to JSON
-	variablesJSON, err := json.Marshal(variables)
+	body, err := c.doGraphQLRequest(searchGql, variables)
 	if err != nil {
-		return nil, fmt.Errorf("failed to marshal variables: %w", err)
-	}
-
-	// Build the request URL exactly like Curd
-	reqURL := fmt.Sprintf("%s?variables=%s&query=%s", c.apiBase, url.QueryEscape(string(variablesJSON)), url.QueryEscape(searchGql))
-
-	req, err := http.NewRequest("GET", reqURL, nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
-	}
-
-	req.Header.Set("User-Agent", c.userAgent)
-	req.Header.Set("Referer", c.referer)
-
-	resp, err := c.client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("failed to make request: %w", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read response: %w", err)
+		return nil, err
 	}
 
 	// Parse using a simple structure like Curd
@@ -199,29 +213,10 @@ func (c *AllAnimeClient) GetEpisodesList(animeID string, mode string) ([]string,
 
 	episodesListGql := `query ($showId: String!) { show( _id: $showId ) { _id availableEpisodesDetail }}`
 
-	// Correctly URL encode the parameters like Curd does
-	variables := fmt.Sprintf(`{"showId":"%s"}`, animeID)
-	reqURL := fmt.Sprintf("%s?variables=%s&query=%s",
-		c.apiBase,
-		url.QueryEscape(variables),
-		url.QueryEscape(episodesListGql))
-
-	req, err := http.NewRequest("GET", reqURL, nil)
+	variables := map[string]interface{}{"showId": animeID}
+	body, err := c.doGraphQLRequest(episodesListGql, variables)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
-	}
-	req.Header.Set("User-Agent", c.userAgent)
-	req.Header.Set("Referer", c.referer)
-
-	resp, err := c.client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("failed to make request: %w", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read response: %w", err)
+		return nil, err
 	}
 
 	// Use the same response structure as Curd
@@ -432,30 +427,16 @@ func (c *AllAnimeClient) GetEpisodeURL(animeID string, episodeNo string, mode st
 	}
 
 	episodeEmbedGQL := `query ($showId: String!, $translationType: VaildTranslationTypeEnumType!, $episodeString: String!) { episode( showId: $showId translationType: $translationType episodeString: $episodeString ) { episodeString sourceUrls }}`
-	variables := fmt.Sprintf(`{"showId":"%s","translationType":"%s","episodeString":"%s"}`, animeID, mode, episodeNo)
 
-	req, err := http.NewRequest("GET", c.apiBase+"/api", nil)
-	if err != nil {
-		return "", nil, fmt.Errorf("failed to create request: %w", err)
+	variablesMap := map[string]interface{}{
+		"showId":          animeID,
+		"translationType": mode,
+		"episodeString":   episodeNo,
 	}
 
-	q := req.URL.Query()
-	q.Add("variables", variables)
-	q.Add("query", episodeEmbedGQL)
-	req.URL.RawQuery = q.Encode()
-
-	req.Header.Set("Referer", c.referer)
-	req.Header.Set("User-Agent", c.userAgent)
-
-	resp, err := c.client.Do(req)
+	body, err := c.doGraphQLRequest(episodeEmbedGQL, variablesMap)
 	if err != nil {
-		return "", nil, fmt.Errorf("failed to make request: %w", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", nil, fmt.Errorf("failed to read response: %w", err)
+		return "", nil, err
 	}
 
 	// Parse the response to extract source URLs
